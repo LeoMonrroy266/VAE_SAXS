@@ -1,30 +1,27 @@
 # coding:utf-8
 import numpy as np
 from numpy.ma.core import concatenate
-
+import pdb2voxel_scaled as pdb2voxel
 import map2iq_main as map2iq
 import time
 import multiprocessing
 import region_search
 import os
-import pdb2voxel_scaled as pdb2voxel
 import argparse
-import processSaxs as ps
 from functools import partial
 import tensorflow as tf
 import os
 import logging
 import absl.logging
-import align2PDB as align2pdb
 from VAE import *
 from density_manipulation import *
 from data_class import ScatterData
 
 
 class Evolution:
-    def __init__(self, output_folder,pdb_scale, voxel_pdb, process_result, vae, max_iter=80):
+    def __init__(self, output_folder,pdb_scale, voxel_pdb, process_result, vae,latent_size, max_iter=80):
         self.output_folder = output_folder
-        self.k_cube = 10  # e.g., ±3σ
+        self.k_cube = 5  # e.g., ±3σ
         self.latent_mu = group_init_parameter[:, 0]
         self.latent_sigma = group_init_parameter[:, 1]
         self.latent_lower = self.latent_mu - self.k_cube * self.latent_sigma
@@ -38,7 +35,7 @@ class Evolution:
         self.voxel_pdb = voxel_pdb
         self.voxel_pdb_scale = pdb_scale
         # length of latent vector
-        self.gene_length = 256
+        self.gene_length = latent_size
         # numbers of two-point crossing one time.
         self.exchange_gene_num = 100
         # initial population
@@ -78,7 +75,7 @@ class Evolution:
 
     # get scores of all the group based on fitness Function.
     def compute_group_score(self, group):
-        latent = group[:, :256]
+        latent = group[:, :self.gene_length]
         s_factor = group[:, -2]
 
         diff_voxels = self.run_decode(latent)
@@ -255,12 +252,12 @@ class Evolution:
                         result_sample = self.run_decode(self.group[:self.statistics_num, :self.gene_length])
                         t3 = time.time()
                         gene = self.gene_data.reshape((-1, self.gene_length + 2))
-                        voxel_group = self.vae.decode(gene[:,:256])
+                        voxel_group = self.vae.decode(gene[:,:self.gene_length])
                         voxel_group = voxel_group.numpy().reshape((-1, self.statistics_num, 32, 32, 32))
                         t4 = time.time()
                         logfile.write('\nvoxel_group cost:%d\n' % (t4 - t3))
                         np.savetxt('%s/bestgene.txt' % output_folder, self.group[0], fmt='%.3f')
-                        return result_sample, voxel_group, self.group[:self.statistics_num, -2], self.group[:self.statistics_num, -1], gene[:, -1].reshape((-1, self.statistics_num)), gene[:, -2].reshape((-1, self.statistics_num)),gene[:,:256].reshape((-1, self.statistics_num)),self.group[:self.statistics_num, :self.gene_length]
+                        return result_sample, voxel_group, self.group[:self.statistics_num, -2], self.group[:self.statistics_num, -1], gene[:, -1].reshape((-1, self.statistics_num)), gene[:, -2].reshape((-1, self.statistics_num)),gene[:,:self.gene_length].reshape((-1, self.statistics_num)),self.group[:self.statistics_num, :self.gene_length]
 
     def generate_original_group(self, num):
         # Sample uniformly within cube
@@ -332,6 +329,7 @@ if __name__ == '__main__':
     parser.add_argument('--output_folder', help='path of output folder where result will be saved', type=str,
                         required=True)
     parser.add_argument('--pdb', help='path to pdb containing starting state', required=True, type=str)
+    parser.add_argument('--latent_size', help='size of latent variable', default=256, type=int)
     parser.add_argument('--max_iter', help='maximum number of iteration', default=80, type=int)
     args = parser.parse_args()
 
@@ -348,12 +346,18 @@ if __name__ == '__main__':
 
     # group_init_parameter is well-trained model's distribution of latent vector, used to initialize gene group.
     group_init_parameter = np.loadtxt(os.path.join(model_path, 'latent_init.txt'),delimiter=' ')
-
+    latent_size = args.latent_size
 
     print("Initiating Network...")
-    encoder = tf.keras.layers.TFSMLayer(f"{model_path}/encoder_model", call_endpoint="serving_default")
-    decoder = tf.keras.layers.TFSMLayer(f"{model_path}/decoder_model", call_endpoint="serving_default")
-    vae = VAE(256, encoder, decoder)
+    if os.path.isdir(f"{args.model_path}/encoder_model") and os.path.isdir(f"{args.model_path}/decoder_model"):
+    	# Load SavedModel directories
+    	encoder = tf.saved_model.load(f"{args.model_path}/encoder_model")
+    	decoder = tf.saved_model.load(f"{args.model_path}/decoder_model")
+    else:
+    	# Fallback to default directories, e.g. loading from .h5 files
+    	encoder = tf.keras.models.load_model(f"{args.model_path}/encoder_model.tf")
+    	decoder = tf.keras.models.load_model(f"{args.model_path}/decoder_model.tf")
+    vae = VAE(latent_size, encoder, decoder)
 
     print("Processing Ground state structure...")
     pdb2voxel.main(pdb, 'ground_state', output_folder)
@@ -371,7 +375,7 @@ if __name__ == '__main__':
 
     logfile = open('%s/log.txt' % output_folder, 'a')
 
-    genetic_object = Evolution(output_folder, voxel_pdb=ground_state_voxel, pdb_scale=pdb_scale, vae=vae, max_iter=max_iter,process_result=saxs_data)
+    genetic_object = Evolution(output_folder, voxel_pdb=ground_state_voxel, pdb_scale=pdb_scale, vae=vae,latent_size=latent_size, max_iter=max_iter,process_result=saxs_data)
     final_iteration_top_voxels, all_iterations_top_voxels,final_iterations_top_sfactors, final_iterations_top_scales,  all_iterations_top_scales ,all_iterations_top_sfactor, latent_all_iterations,final_iteration_latent_top = genetic_object.evolution_iteration()
 
 
